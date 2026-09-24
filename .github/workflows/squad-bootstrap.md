@@ -232,7 +232,14 @@ safe-outputs:
               const checkout = join(process.env.GITHUB_WORKSPACE, 'bootstrap-repo');
               const checkoutRoot = resolve(checkout);
               const candidateRoot = realpathSync(mkdtempSync(join(tmpdir(), 'squad-bootstrap-candidate-')));
-              cpSync(checkoutRoot, candidateRoot, { recursive: true });
+              const gitDir = resolve(checkoutRoot, '.git');
+              cpSync(checkoutRoot, candidateRoot, {
+                recursive: true,
+                filter: (source) => {
+                  const resolved = resolve(source);
+                  return resolved !== gitDir && !resolved.startsWith(`${gitDir}${sep}`);
+                },
+              });
               const bootstrapModule = await import(pathToFileURL(join(
                 checkout,
                 '.github/workflows/shared/squad-bootstrap-validator.mjs',
@@ -375,12 +382,19 @@ safe-outputs:
                   }
                 }
                 if (ref !== process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH) {
-                  const comparison = await github.rest.repos.compareCommitsWithBasehead({
-                    ...context.repo,
-                    basehead: `${process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH}...${ref}`,
-                    per_page: 100,
-                  });
-                  const changed = (comparison.data.files || []).map((file) => file.filename).sort();
+                  const changedFiles = [];
+                  for (let page = 1; ; page += 1) {
+                    const comparison = await github.rest.repos.compareCommitsWithBasehead({
+                      ...context.repo,
+                      basehead: `${process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH}...${ref}`,
+                      per_page: 100,
+                      page,
+                    });
+                    const files = comparison.data.files || [];
+                    changedFiles.push(...files);
+                    if (files.length < 100) break;
+                  }
+                  const changed = changedFiles.map((file) => file.filename).sort();
                   const allowed = payload.files.map((file) => file.path).sort();
                   if (JSON.stringify(changed) !== JSON.stringify(allowed)) {
                     throw new Error(`Existing bootstrap branch changed files outside the validated payload: ${changed.join(', ')}`);
