@@ -147,6 +147,7 @@ pre-agent-steps:
       }
       # These hashes pin the validator resources installed by this workflow.
       # Regenerate with: sha256sum .github/workflows/shared/squad-cast-validator.mjs .github/workflows/shared/squad-bootstrap-validator.mjs
+      # Paste the resulting digests into the two check_hash calls below.
       # Then run: gh aw compile
       check_hash "$cast_validator" "62fbf47b51639fd1878c143e5176ee3099e390065997411511e9d483d467bbce"
       check_hash "$bootstrap_validator" "d449b9204f7fad133ff7133c1a30c9381c87e3c0c9d481352819ca93ea1a1dad"
@@ -390,7 +391,7 @@ safe-outputs:
                   }
                 }
                 if (ref !== process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH) {
-                  if (payload.files.length > 300) {
+                  if (payload.files.length > 100) {
                     throw new Error('Validated bootstrap payload exceeds GitHub compare file-list verification capacity.');
                   }
                   const comparison = await github.rest.repos.compareCommitsWithBasehead({
@@ -399,7 +400,7 @@ safe-outputs:
                     per_page: 100,
                   });
                   const changedFiles = comparison.data.files || [];
-                  if (changedFiles.length >= 300) {
+                  if (changedFiles.length >= 100) {
                     throw new Error('Existing bootstrap branch compare result is truncated; refusing replacement.');
                   }
                   const changed = changedFiles.map((file) => file.filename).sort();
@@ -456,15 +457,12 @@ safe-outputs:
                     sha: commit.data.sha,
                   });
                 }
-                const existingPullRequests = await github.paginate(github.rest.pulls.list, {
-                  ...context.repo,
-                  state: 'all',
-                  head: `${context.repo.owner}:${bootstrapModule.BOOTSTRAP_BRANCH}`,
-                  base: process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH,
-                  per_page: 100,
-                });
-                const existingPullRequest = existingPullRequests.find(
-                  (candidate) => candidate.title === bootstrapModule.BOOTSTRAP_PR_TITLE,
+                const existingPullRequest = snapshot.pullRequests.find(
+                  (candidate) =>
+                    candidate.title === bootstrapModule.BOOTSTRAP_PR_TITLE &&
+                    candidate.base?.ref === process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH &&
+                    (candidate.head?.ref === bootstrapModule.BOOTSTRAP_BRANCH ||
+                      candidate.head?.label === `${context.repo.owner}:${bootstrapModule.BOOTSTRAP_BRANCH}`),
                 );
                 if (existingPullRequest) {
                   pullRequest = {
