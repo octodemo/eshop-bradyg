@@ -269,6 +269,9 @@ safe-outputs:
                   if (relativePath.trim() === '') {
                     throw new Error('Bootstrap payload path must not be empty.');
                   }
+                  if (relativePath.split('/').includes('..')) {
+                    throw new Error(`Bootstrap payload path must not contain '..' segments: ${relativePath}`);
+                  }
                   if (isAbsolute(relativePath)) {
                     throw new Error(`Bootstrap payload path must be relative: ${relativePath}`);
                   }
@@ -276,7 +279,12 @@ safe-outputs:
                   if (!target.startsWith(`${candidateRoot}${sep}`)) {
                     throw new Error(`Bootstrap payload path escapes candidate tree: ${relativePath}`);
                   }
-                  mkdirSync(dirname(target), { recursive: true });
+                  const parent = dirname(target);
+                  mkdirSync(parent, { recursive: true });
+                  const realParent = realpathSync(parent);
+                  if (realParent !== candidateRoot && !realParent.startsWith(`${candidateRoot}${sep}`)) {
+                    throw new Error(`Bootstrap payload path parent escapes candidate tree: ${relativePath}`);
+                  }
                   writeFileSync(target, String(file.content || ''));
                 }
               } catch (error) {
@@ -382,17 +390,17 @@ safe-outputs:
                   }
                 }
                 if (ref !== process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH) {
-                  const changedFiles = [];
-                  for (let page = 1; ; page += 1) {
-                    const comparison = await github.rest.repos.compareCommitsWithBasehead({
-                      ...context.repo,
-                      basehead: `${process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH}...${ref}`,
-                      per_page: 100,
-                      page,
-                    });
-                    const files = comparison.data.files || [];
-                    changedFiles.push(...files);
-                    if (files.length < 100) break;
+                  if (payload.files.length > 300) {
+                    throw new Error('Validated bootstrap payload exceeds GitHub compare file-list verification capacity.');
+                  }
+                  const comparison = await github.rest.repos.compareCommitsWithBasehead({
+                    ...context.repo,
+                    basehead: `${process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH}...${ref}`,
+                    per_page: 100,
+                  });
+                  const changedFiles = comparison.data.files || [];
+                  if (changedFiles.length >= 300) {
+                    throw new Error('Existing bootstrap branch compare result is truncated; refusing replacement.');
                   }
                   const changed = changedFiles.map((file) => file.filename).sort();
                   const allowed = payload.files.map((file) => file.path).sort();
@@ -448,20 +456,39 @@ safe-outputs:
                     sha: commit.data.sha,
                   });
                 }
-                const created = await github.rest.pulls.create({
+                const existingPullRequests = await github.paginate(github.rest.pulls.list, {
                   ...context.repo,
-                  title: bootstrapModule.BOOTSTRAP_PR_TITLE,
-                  head: bootstrapModule.BOOTSTRAP_BRANCH,
+                  state: 'all',
+                  head: `${context.repo.owner}:${bootstrapModule.BOOTSTRAP_BRANCH}`,
                   base: process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH,
-                  body: payload.pr_body,
-                  draft: true,
+                  per_page: 100,
                 });
-                pullRequest = {
-                  number: created.data.number,
-                  state: created.data.state,
-                  merged: false,
-                  url: created.data.html_url,
-                };
+                const existingPullRequest = existingPullRequests.find(
+                  (candidate) => candidate.title === bootstrapModule.BOOTSTRAP_PR_TITLE,
+                );
+                if (existingPullRequest) {
+                  pullRequest = {
+                    number: existingPullRequest.number,
+                    state: existingPullRequest.state,
+                    merged: Boolean(existingPullRequest.merged_at || existingPullRequest.merged),
+                    url: existingPullRequest.html_url,
+                  };
+                } else {
+                  const created = await github.rest.pulls.create({
+                    ...context.repo,
+                    title: bootstrapModule.BOOTSTRAP_PR_TITLE,
+                    head: bootstrapModule.BOOTSTRAP_BRANCH,
+                    base: process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH,
+                    body: payload.pr_body,
+                    draft: true,
+                  });
+                  pullRequest = {
+                    number: created.data.number,
+                    state: created.data.state,
+                    merged: false,
+                    url: created.data.html_url,
+                  };
+                }
               } else {
                 const ref = pullRequest.merged
                   ? process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH
@@ -670,7 +697,8 @@ The issue body must:
    cites at least one concrete existing repository path in backticks.
 7. Give each proposal a copyable command beginning
    `/squad research Focus only on proposal Pn:`.
-8. Include valid examples for several proposals and all proposals:
+8. Include one valid example command covering a subset of proposals and one
+   valid example command covering all proposals:
    `/squad research Evaluate proposals P1 and P2 together...` and
    `/squad research Evaluate proposals P1 through Pn...`.
 9. Continue with `/squad triage`, `/squad triage revise <feedback>`,
