@@ -147,6 +147,7 @@ pre-agent-steps:
       }
       # These hashes pin the validator resources installed by this workflow.
       # Regenerate with: sha256sum .github/workflows/shared/squad-cast-validator.mjs .github/workflows/shared/squad-bootstrap-validator.mjs
+      # Then run: gh aw compile
       check_hash "$cast_validator" "31e568ae4a0cc372f5b79d4b024ba8b7af1f38feac54034221fb203da9918ab4"
       check_hash "$bootstrap_validator" "d449b9204f7fad133ff7133c1a30c9381c87e3c0c9d481352819ca93ea1a1dad"
       node "$bootstrap_validator" \
@@ -223,14 +224,14 @@ safe-outputs:
             SQUAD_BOOTSTRAP_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           with:
             script: |
-              const { cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } = await import('node:fs');
+              const { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } = await import('node:fs');
               const { tmpdir } = await import('node:os');
-              const { dirname, isAbsolute, join, resolve } = await import('node:path');
+              const { dirname, isAbsolute, join, resolve, sep } = await import('node:path');
               const { pathToFileURL } = await import('node:url');
 
               const checkout = join(process.env.GITHUB_WORKSPACE, 'bootstrap-repo');
               const checkoutRoot = resolve(checkout);
-              const candidateRoot = mkdtempSync(join(tmpdir(), 'squad-bootstrap-candidate-'));
+              const candidateRoot = realpathSync(mkdtempSync(join(tmpdir(), 'squad-bootstrap-candidate-')));
               cpSync(checkoutRoot, candidateRoot, { recursive: true });
               const bootstrapModule = await import(pathToFileURL(join(
                 checkout,
@@ -264,7 +265,7 @@ safe-outputs:
                     throw new Error(`Bootstrap payload path must be relative: ${relativePath}`);
                   }
                   const target = resolve(candidateRoot, relativePath);
-                  if (target !== candidateRoot && !target.startsWith(`${candidateRoot}/`)) {
+                  if (!target.startsWith(`${candidateRoot}${sep}`)) {
                     throw new Error(`Bootstrap payload path escapes candidate tree: ${relativePath}`);
                   }
                   mkdirSync(dirname(target), { recursive: true });
@@ -346,11 +347,19 @@ safe-outputs:
               };
               const assertRemotePayload = async (ref) => {
                 for (const file of payload.files) {
-                  const response = await github.rest.repos.getContent({
-                    ...context.repo,
-                    path: file.path,
-                    ref,
-                  });
+                  let response;
+                  try {
+                    response = await github.rest.repos.getContent({
+                      ...context.repo,
+                      path: file.path,
+                      ref,
+                    });
+                  } catch (error) {
+                    if (error.status === 404) {
+                      throw new Error(`Existing bootstrap branch is missing validated path ${file.path}; refusing replacement.`);
+                    }
+                    throw error;
+                  }
                   if (Array.isArray(response.data) || response.data.type !== 'file') {
                     throw new Error(`Bootstrap branch path is not a file: ${file.path}`);
                   }
@@ -441,7 +450,8 @@ safe-outputs:
               }
 
               if (!pullRequest?.url) {
-                throw new Error('The deterministic Cast PR URL is unavailable after materialization.');
+                core.setFailed('The deterministic Cast PR URL is unavailable after materialization.');
+                return;
               }
               const finalPayload = {
                 ...payload,
