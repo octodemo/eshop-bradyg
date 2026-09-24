@@ -222,15 +222,12 @@ safe-outputs:
           with:
             script: |
               const { mkdirSync, readFileSync, writeFileSync } = await import('node:fs');
-              const { dirname, join } = await import('node:path');
+              const { dirname, isAbsolute, join, resolve } = await import('node:path');
               const { pathToFileURL } = await import('node:url');
 
               const checkout = join(process.env.GITHUB_WORKSPACE, 'bootstrap-repo');
-              const stateModule = await import(pathToFileURL(join(
-                checkout,
-                '.github/workflows/shared/squad-bootstrap-validator.mjs',
-              )).href);
-              const validatorModule = await import(pathToFileURL(join(
+              const checkoutRoot = resolve(checkout);
+              const bootstrapModule = await import(pathToFileURL(join(
                 checkout,
                 '.github/workflows/shared/squad-bootstrap-validator.mjs',
               )).href);
@@ -245,7 +242,7 @@ safe-outputs:
               let payloadText;
               let payload;
               try {
-                payloadText = validatorModule.reconstructBootstrapPayload(items[0]);
+                payloadText = bootstrapModule.reconstructBootstrapPayload(items[0]);
                 payload = JSON.parse(payloadText);
               } catch (error) {
                 core.setFailed(`Bootstrap payload transport is invalid: ${error.message}`);
@@ -253,15 +250,21 @@ safe-outputs:
               }
               const payloadPath = join(checkout, '.github/workflows/squad-bootstrap-payload.json');
               for (const file of payload.files || []) {
-                const target = join(checkout, ...String(file.path || '').split('/'));
+                const relativePath = String(file.path || '');
+                if (isAbsolute(relativePath)) {
+                  throw new Error(`Bootstrap payload path must be relative: ${relativePath}`);
+                }
+                const target = resolve(checkoutRoot, relativePath);
+                if (target !== checkoutRoot && !target.startsWith(`${checkoutRoot}/`)) {
+                  throw new Error(`Bootstrap payload path escapes checkout: ${relativePath}`);
+                }
                 mkdirSync(dirname(target), { recursive: true });
                 writeFileSync(target, String(file.content || ''));
               }
-              writeFileSync(payloadPath, payloadText);
 
               const validate = (candidate, linkMode) => {
                 writeFileSync(payloadPath, `${JSON.stringify(candidate)}\n`);
-                const errors = validatorModule.validateBootstrapPayload({
+                const errors = bootstrapModule.validateBootstrapPayload({
                   root: checkout,
                   payloadPath,
                   repository: context.repo.owner + '/' + context.repo.repo,
@@ -285,7 +288,7 @@ safe-outputs:
                   state: 'all',
                   per_page: 100,
                 })).filter((issue) => !issue.pull_request);
-                const preliminary = stateModule.classifyBootstrapState({
+                const preliminary = bootstrapModule.classifyBootstrapState({
                   pullRequests,
                   issues,
                   defaultBranch: process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH,
@@ -301,7 +304,7 @@ safe-outputs:
                   pullRequests,
                   issues,
                   comments,
-                  state: stateModule.classifyBootstrapState({
+                  state: bootstrapModule.classifyBootstrapState({
                     pullRequests,
                     issues,
                     comments,
@@ -359,10 +362,10 @@ safe-outputs:
 
               let pullRequest = snapshot.state.pull_request;
               if (!pullRequest) {
-                const branchRefName = `heads/${stateModule.BOOTSTRAP_BRANCH}`;
+                const branchRefName = `heads/${bootstrapModule.BOOTSTRAP_BRANCH}`;
                 const existingRef = await getRef(branchRefName);
                 if (existingRef) {
-                  await assertRemotePayload(stateModule.BOOTSTRAP_BRANCH);
+                  await assertRemotePayload(bootstrapModule.BOOTSTRAP_BRANCH);
                 } else {
                   const baseRef = await github.rest.git.getRef({
                     ...context.repo,
@@ -399,14 +402,14 @@ safe-outputs:
                   });
                   await github.rest.git.createRef({
                     ...context.repo,
-                    ref: `refs/heads/${stateModule.BOOTSTRAP_BRANCH}`,
+                    ref: `refs/heads/${bootstrapModule.BOOTSTRAP_BRANCH}`,
                     sha: commit.data.sha,
                   });
                 }
                 const created = await github.rest.pulls.create({
                   ...context.repo,
-                  title: stateModule.BOOTSTRAP_PR_TITLE,
-                  head: stateModule.BOOTSTRAP_BRANCH,
+                  title: bootstrapModule.BOOTSTRAP_PR_TITLE,
+                  head: bootstrapModule.BOOTSTRAP_BRANCH,
                   base: process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH,
                   body: payload.pr_body,
                   draft: true,
@@ -420,7 +423,7 @@ safe-outputs:
               } else {
                 const ref = pullRequest.merged
                   ? process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH
-                  : stateModule.BOOTSTRAP_BRANCH;
+                  : bootstrapModule.BOOTSTRAP_BRANCH;
                 await assertRemotePayload(ref);
               }
 
@@ -429,7 +432,7 @@ safe-outputs:
               }
               const finalPayload = {
                 ...payload,
-                issue_body: payload.issue_body.replace('{{CAST_PR_URL}}', pullRequest.url),
+                issue_body: payload.issue_body.replaceAll('{{CAST_PR_URL}}', pullRequest.url),
               };
               validate(finalPayload, 'resolved');
 
@@ -444,19 +447,19 @@ safe-outputs:
                 await github.rest.issues.update({
                   ...context.repo,
                   issue_number: issueNumber,
-                  title: stateModule.BOOTSTRAP_ISSUE_TITLE,
+                  title: bootstrapModule.BOOTSTRAP_ISSUE_TITLE,
                   body: finalPayload.issue_body,
                 });
               } else {
                 const createdIssue = await github.rest.issues.create({
                   ...context.repo,
-                  title: stateModule.BOOTSTRAP_ISSUE_TITLE,
+                  title: bootstrapModule.BOOTSTRAP_ISSUE_TITLE,
                   body: finalPayload.issue_body,
                 });
                 issueNumber = createdIssue.data.number;
               }
 
-              const researchBody = validatorModule.createBootstrapResearchComment(
+              const researchBody = bootstrapModule.createBootstrapResearchComment(
                 finalPayload.issue_body,
                 issueNumber,
               );
@@ -465,13 +468,13 @@ safe-outputs:
                 issue_number: issueNumber,
                 per_page: 100,
               });
-              const researchArtifacts = validatorModule.findBootstrapResearchArtifacts(
+              const researchArtifacts = bootstrapModule.findBootstrapResearchArtifacts(
                 comments,
                 issueNumber,
               );
               const currentResearch = researchArtifacts.at(-1);
               if (currentResearch) {
-                if (validatorModule.isBootstrapResearchSeed(currentResearch)) {
+                if (bootstrapModule.isBootstrapResearchSeed(currentResearch)) {
                   await github.rest.issues.updateComment({
                     ...context.repo,
                     comment_id: currentResearch.id,
