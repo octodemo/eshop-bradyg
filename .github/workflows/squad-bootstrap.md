@@ -145,6 +145,8 @@ pre-agent-steps:
         }
         node --check "$path" >/dev/null
       }
+      # These hashes pin the validator resources installed by this workflow.
+      # Regenerate with: sha256sum .github/workflows/shared/squad-cast-validator.mjs .github/workflows/shared/squad-bootstrap-validator.mjs
       check_hash "$cast_validator" "31e568ae4a0cc372f5b79d4b024ba8b7af1f38feac54034221fb203da9918ab4"
       check_hash "$bootstrap_validator" "d449b9204f7fad133ff7133c1a30c9381c87e3c0c9d481352819ca93ea1a1dad"
       node "$bootstrap_validator" \
@@ -221,12 +223,15 @@ safe-outputs:
             SQUAD_BOOTSTRAP_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           with:
             script: |
-              const { mkdirSync, readFileSync, writeFileSync } = await import('node:fs');
+              const { cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } = await import('node:fs');
+              const { tmpdir } = await import('node:os');
               const { dirname, isAbsolute, join, resolve } = await import('node:path');
               const { pathToFileURL } = await import('node:url');
 
               const checkout = join(process.env.GITHUB_WORKSPACE, 'bootstrap-repo');
               const checkoutRoot = resolve(checkout);
+              const candidateRoot = mkdtempSync(join(tmpdir(), 'squad-bootstrap-candidate-'));
+              cpSync(checkoutRoot, candidateRoot, { recursive: true });
               const bootstrapModule = await import(pathToFileURL(join(
                 checkout,
                 '.github/workflows/shared/squad-bootstrap-validator.mjs',
@@ -248,24 +253,32 @@ safe-outputs:
                 core.setFailed(`Bootstrap payload transport is invalid: ${error.message}`);
                 return;
               }
-              const payloadPath = join(checkout, '.github/workflows/squad-bootstrap-payload.json');
-              for (const file of payload.files || []) {
-                const relativePath = String(file.path || '');
-                if (isAbsolute(relativePath)) {
-                  throw new Error(`Bootstrap payload path must be relative: ${relativePath}`);
+              const payloadPath = join(candidateRoot, '.github/workflows/squad-bootstrap-payload.json');
+              try {
+                for (const file of payload.files || []) {
+                  const relativePath = String(file.path || '');
+                  if (relativePath.trim() === '') {
+                    throw new Error('Bootstrap payload path must not be empty.');
+                  }
+                  if (isAbsolute(relativePath)) {
+                    throw new Error(`Bootstrap payload path must be relative: ${relativePath}`);
+                  }
+                  const target = resolve(candidateRoot, relativePath);
+                  if (target !== candidateRoot && !target.startsWith(`${candidateRoot}/`)) {
+                    throw new Error(`Bootstrap payload path escapes candidate tree: ${relativePath}`);
+                  }
+                  mkdirSync(dirname(target), { recursive: true });
+                  writeFileSync(target, String(file.content || ''));
                 }
-                const target = resolve(checkoutRoot, relativePath);
-                if (target !== checkoutRoot && !target.startsWith(`${checkoutRoot}/`)) {
-                  throw new Error(`Bootstrap payload path escapes checkout: ${relativePath}`);
-                }
-                mkdirSync(dirname(target), { recursive: true });
-                writeFileSync(target, String(file.content || ''));
+              } catch (error) {
+                core.setFailed(error.message);
+                return;
               }
 
               const validate = (candidate, linkMode) => {
                 writeFileSync(payloadPath, `${JSON.stringify(candidate)}\n`);
                 const errors = bootstrapModule.validateBootstrapPayload({
-                  root: checkout,
+                  root: candidateRoot,
                   payloadPath,
                   repository: context.repo.owner + '/' + context.repo.repo,
                   defaultBranch: process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH,
