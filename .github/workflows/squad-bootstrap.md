@@ -148,7 +148,7 @@ pre-agent-steps:
       # These hashes pin the validator resources installed by this workflow.
       # Regenerate with: sha256sum .github/workflows/shared/squad-cast-validator.mjs .github/workflows/shared/squad-bootstrap-validator.mjs
       # Then run: gh aw compile
-      check_hash "$cast_validator" "31e568ae4a0cc372f5b79d4b024ba8b7af1f38feac54034221fb203da9918ab4"
+      check_hash "$cast_validator" "62fbf47b51639fd1878c143e5176ee3099e390065997411511e9d483d467bbce"
       check_hash "$bootstrap_validator" "d449b9204f7fad133ff7133c1a30c9381c87e3c0c9d481352819ca93ea1a1dad"
       node "$bootstrap_validator" \
         --root "$PWD" \
@@ -245,18 +245,19 @@ safe-outputs:
                 core.setFailed(`Expected exactly one materialize_bootstrap item, found ${items.length}.`);
                 return;
               }
-              let payloadText;
               let payload;
               try {
-                payloadText = bootstrapModule.reconstructBootstrapPayload(items[0]);
-                payload = JSON.parse(payloadText);
+                payload = JSON.parse(bootstrapModule.reconstructBootstrapPayload(items[0]));
+                if (!Array.isArray(payload.files) || payload.files.length === 0) {
+                  throw new Error('Bootstrap payload files must be a non-empty array.');
+                }
               } catch (error) {
                 core.setFailed(`Bootstrap payload transport is invalid: ${error.message}`);
                 return;
               }
-              const payloadPath = join(candidateRoot, '.github/workflows/squad-bootstrap-payload.json');
+              const payloadPath = join(mkdtempSync(join(tmpdir(), 'squad-bootstrap-payload-')), 'payload.json');
               try {
-                for (const file of payload.files || []) {
+                for (const file of payload.files) {
                   const relativePath = String(file.path || '');
                   if (relativePath.trim() === '') {
                     throw new Error('Bootstrap payload path must not be empty.');
@@ -289,7 +290,12 @@ safe-outputs:
                   throw new Error(`Squad bootstrap validation failed:\n${errors.map((error) => `- ${error}`).join('\n')}`);
                 }
               };
-              validate(payload, 'placeholder');
+              try {
+                validate(payload, 'placeholder');
+              } catch (error) {
+                core.setFailed(error.message);
+                return;
+              }
 
               const listState = async () => {
                 const pullRequests = await github.paginate(github.rest.pulls.list, {
@@ -457,7 +463,12 @@ safe-outputs:
                 ...payload,
                 issue_body: payload.issue_body.replaceAll('{{CAST_PR_URL}}', pullRequest.url),
               };
-              validate(finalPayload, 'resolved');
+              try {
+                validate(finalPayload, 'resolved');
+              } catch (error) {
+                core.setFailed(error.message);
+                return;
+              }
 
               snapshot = await listState();
               let issueNumber;
